@@ -29,6 +29,7 @@ from xiaogpt.tts import TTS, MiTTS, TetosFileTTS
 from xiaogpt.tts.live import TetosLiveTTS
 from xiaogpt.miot_retry import device_command
 from xiaogpt.miio_compat import MiIOService
+from xiaogpt.pickup_printer import PickupPrinter, parse_pickup_command
 from xiaogpt.utils import detect_language, parse_cookie_string
 
 EOF = object()
@@ -64,6 +65,7 @@ class MiAccount(miservice.MiAccount):
 class MiGPT:
     def __init__(self, config: Config):
         self.config = config
+        self.pickup_printer = PickupPrinter(config.printer_project, config.printer_address, config.printer_enabled)
 
         self.mi_token_home = Path(
             os.getenv("XIAOGPT_MI_TOKEN_PATH", Path.home() / ".mi.token")
@@ -422,6 +424,21 @@ class MiGPT:
 
             # drop key words
             query = re.sub(rf"^({'|'.join(self.config.keyword)})", "", query)
+            if parse_pickup_command(query)[0] and self.config.mute_xiaoai:
+                try:
+                    await self.stop_if_xiaoai_is_playing()
+                except Exception as error:
+                    print(f"暂停小爱原生回答失败，继续处理打印：{error}")
+            local_reply = await self.pickup_printer.handle(
+                query, new_record.get("requestId") or new_record.get("time")
+            )
+            if local_reply is not None:
+                print(local_reply)
+                try:
+                    await self.do_tts(local_reply)
+                except Exception as error:
+                    print(f"打印反馈播报失败，不重复打印：{error}")
+                continue
             # llama3 is not good at Chinese, so we need to add prompt in it.
             if self.config.bot == "llama":
                 query = f"你是一个基于 llama3 的智能助手，请你跟我对话时，一定使用中文，不要夹杂一些英文单词，甚至英语短语也不能随意使用，但类似于 llama3 这样的专属名词除外，问题是：{query}"

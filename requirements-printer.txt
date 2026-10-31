@@ -1,0 +1,3 @@
+# Optional local Paperang P1/P1B voice printing support.
+bleak>=1.0
+Pillow>=10.0

@@ -81,6 +81,9 @@ class Config:
     api_base: str | None = None
     deployment_id: str | None = None
     use_command: bool = False
+    printer_enabled: bool = False
+    printer_project: str = r"F:\AI\喵喵机上位机"
+    printer_address: str = ""
     verbose: int = 0
     start_conversation: str = "开始持续对话"
     end_conversation: str = "结束持续对话"

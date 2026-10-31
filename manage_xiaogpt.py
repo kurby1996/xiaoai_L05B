@@ -94,6 +94,8 @@ def main():
         sys.argv = ["xiaogpt", "--config", str(CONFIG), "--use_command"]
         print("L05B 已启用 use_command。对音箱说：小爱同学，请介绍一下你自己。Ctrl+C 停止。")
         print("已启用小米设备接口客户端兼容修复。")
+        if config.get("printer_enabled"):
+            print("已启用喵喵机：可说“帮我打印取件码8888”。请先断开手机和打印台网页的打印机蓝牙。")
         run()
     else:
         raise ValueError("未知操作: " + mode)
