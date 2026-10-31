@@ -1,0 +1,15 @@
+# Local credentials and Xiaomi sessions
+config.local.json
+state/
+*.token
+.env
+.env.*
+# Local runtimes, caches and nested upstream checkout metadata
+.venv/
+.uv-cache/
+__pycache__/
+*.py[cod]
+*.log
+xiaogpt/.git/
+# Investigation-only script
+probe_cloud_transport.py

@@ -1,0 +1,20 @@
+{
+  "hardware": "L05B",
+  "account": "",
+  "password": "",
+  "mi_did": "",
+  "use_command": true,
+  "mute_xiaoai": true,
+  "bot": "chatgptapi",
+  "api_base": "https://api.deepseek.com",
+  "openai_key": "",
+  "gpt_options": {
+    "model": "deepseek-v4-flash",
+    "extra_body": { "thinking": { "type": "disabled" } }
+  },
+  "tts": "mi",
+  "stream": false,
+  "keyword": ["请", "帮我"],
+  "prompt": "请用简洁自然的中文回答，控制在150字以内，不使用Markdown、表格或链接。",
+  "verbose": 0
+}
