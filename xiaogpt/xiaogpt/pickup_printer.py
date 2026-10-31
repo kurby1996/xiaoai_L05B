@@ -20,8 +20,11 @@ KEY = 0x35769521
 
 def parse_pickup_command(query):
     text = unicodedata.normalize("NFKC", query).strip()
-    text = re.sub(r"^(?:小爱同学[，,\s]*)?(?:(?:请|帮我)[，,\s]*)+", "", text)
+    text = re.sub(r"^小爱同学[，,\s]*", "", text)
+    text = re.sub(r"^(?:(?:请|帮我)[，,\s]*)+", "", text)
     match = re.fullmatch(r"打印(?:一下|一张)?(?:快递)?取件码[是为:：，,\s]*(.*)", text)
+    if not match:
+        match = re.fullmatch(r"打印(?:一下|一张)?[:：，,\s]*([0-9零〇一幺二两三四五六七八九].*)", text)
     if not match:
         return False, None
     code = match[1].strip().rstrip("。.!！")

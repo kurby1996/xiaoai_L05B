@@ -8,12 +8,27 @@ from xiaogpt.pickup_printer import PickupPrinter, frame, parse_pickup_command, r
 class PickupCommands(unittest.IsolatedAsyncioTestCase):
     def test_codes_preserve_digits_and_separators(self):
         for query, expected in (
+            ("打印1234", "1234"),
+            ("小爱同学，打印1234", "1234"),
+            ("请打印００１２", "0012"),
+            ("打印一二三四", "1234"),
             ("帮我打印取件码 8888", "8888"),
             ("请打印取件码零零八八", "0088"),
             ("打印取件码８－３０２１。", "8-3021"),
             ("打印取件码幺二杠三四", "12-34"),
         ):
             self.assertEqual(parse_pickup_command(query), (True, expected))
+
+    def test_short_command_reaches_dispatch_without_question_keyword(self):
+        from types import SimpleNamespace
+        from xiaogpt.xiaogpt import MiGPT
+        bot = MiGPT.__new__(MiGPT)
+        bot.config = SimpleNamespace(printer_enabled=True, keyword=["请", "帮我"])
+        bot.in_conversation = False
+        self.assertTrue(bot.need_ask_gpt({"query": "打印1234"}))
+        self.assertFalse(bot.need_ask_gpt({"query": "不要打印1234"}))
+        bot.config.printer_enabled = False
+        self.assertFalse(bot.need_ask_gpt({"query": "打印1234"}))
 
     def test_noncommands_and_ambiguous_numbers_do_not_print(self):
         for query in ("不要打印取件码8888", "取件码8888", "怎么打印取件码", "打印机是什么"):

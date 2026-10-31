@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 import functools
 import json
 import logging
@@ -71,61 +72,48 @@ class MiGPT:
             os.getenv("XIAOGPT_MI_TOKEN_PATH", Path.home() / ".mi.token")
         )
         self.last_timestamp = int(time.time() * 1000)  # timestamp last call mi speaker
+        self.started_timestamp = self.last_timestamp
+        self.seen_voice_records = OrderedDict()
         self.cookie_jar = None
         self.device_id = ""
         self.mina_service = None
         self.miio_service = None
         self.in_conversation = False
         self.polling_event = asyncio.Event()
-        self.last_record = asyncio.Queue(1)
+        self.last_record = asyncio.Queue(64)
+        self.poll_task = None
         # setup logger
         self.log = logging.getLogger("xiaogpt")
         self.log.setLevel(logging.DEBUG if config.verbose else logging.INFO)
-        self.log.addHandler(RichHandler())
-        self.log.debug(config)
-        self.mi_session = ClientSession()
+        if not any(isinstance(handler, RichHandler) for handler in self.log.handlers):
+            self.log.addHandler(RichHandler())
+        self.mi_session = ClientSession(timeout=ClientTimeout(total=20))
 
     async def close(self):
+        if self.poll_task is not None:
+            self.poll_task.cancel()
+            await asyncio.gather(self.poll_task, return_exceptions=True)
         await self.mi_session.close()
 
     async def poll_latest_ask(self):
         async with ClientSession() as session:
-            session._cookie_jar = self.cookie_jar
-            log_polling = int(self.config.verbose) > 1
             while True:
-                if log_polling:
-                    self.log.debug(
-                        "Listening new message, timestamp: %s", self.last_timestamp
-                    )
-                new_record = await self.get_latest_ask_from_xiaoai(session)
                 start = time.perf_counter()
-                if log_polling:
-                    self.log.debug(
-                        "Polling_event, timestamp: %s %s",
-                        self.last_timestamp,
-                        new_record,
-                    )
-                await self.polling_event.wait()
-                if (
-                    self.config.mute_xiaoai
-                    and new_record
-                    and self.need_ask_gpt(new_record)
-                ):
-                    await self.stop_if_xiaoai_is_playing()
-                if (d := time.perf_counter() - start) < 1:
-                    # sleep to avoid too many request
-                    if log_polling:
-                        self.log.debug(
-                            "Sleep %f, timestamp: %s", d, self.last_timestamp
-                        )
-                    # if you want force mute xiaoai, comment this line below.
-                    await asyncio.sleep(1 - d)
+                try:
+                    # Polling must continue while the consumer awaits a model,
+                    # TTS or printer. Only the consumer pauses speaker playback.
+                    session._cookie_jar = self.cookie_jar
+                    await self.get_latest_ask_from_xiaoai(session)
+                except Exception as error:
+                    self.log.warning("语音记录轮询失败（%s），稍后继续", type(error).__name__)
+                await asyncio.sleep(max(0, 1 - (time.perf_counter() - start)))
 
     async def init_all_data(self, refresh_token: bool = False):
         await self.login_miboy(refresh_token)
         await self._init_data_hardware()
         self.mi_session.cookie_jar.update_cookies(self.get_cookie())
         self.cookie_jar = self.mi_session.cookie_jar
+        self.__dict__.pop("tts", None)  # refreshed credentials need a fresh TTS client
         self.tts  # init tts
 
     async def login_miboy(self, refresh_token: bool = False):
@@ -222,8 +210,8 @@ class MiGPT:
             return False
         query = record.get("query", "")
         return (
-            self.in_conversation
-            and not query.startswith(WAKEUP_KEYWORD)
+            (self.config.printer_enabled and parse_pickup_command(query)[0])
+            or (self.in_conversation and not query.startswith(WAKEUP_KEYWORD))
             or query.lower().startswith(tuple(w.lower() for w in self.config.keyword))
         )
 
@@ -259,14 +247,19 @@ class MiGPT:
                 continue
             try:
                 data = await r.json()
+                if r.status in (401, 403) or data.get("code") not in (None, 0):
+                    raise ValueError("conversation request rejected")
             except Exception:
                 self.log.warning("get latest ask from xiaoai error, retry")
                 if i == 1:
                     # tricky way to fix #282 #272 # if it is the third time we re init all data
                     print("Maybe outof date trying to re init it")
                     await self._retry()
+                    session._cookie_jar = self.cookie_jar
             else:
                 return self._get_last_query(data)
+            finally:
+                r.release()
         return None
 
     async def _retry(self):
@@ -275,20 +268,41 @@ class MiGPT:
         await self.init_all_data(refresh_token=True)
 
     def _get_last_query(self, data: dict) -> dict | None:
-        if d := data.get("data"):
-            records = json.loads(d).get("records")
-            if not records:
-                return None
-            last_record = records[0]
-            timestamp = last_record.get("time")
-            if timestamp > self.last_timestamp:
+        payload = data.get("data")
+        if not payload:
+            return None
+        payload = json.loads(payload) if isinstance(payload, str) else payload
+        records = payload.get("records") or []
+        records = [record for record in records if isinstance(record, dict)
+                   and isinstance(record.get("time"), (int, float))
+                   and isinstance(record.get("query"), str)]
+        first = None
+        for record in sorted(records, key=lambda item: item["time"]):
+            timestamp = record["time"]
+            if timestamp <= self.started_timestamp:
+                continue
+            identity = (timestamp, record.get("requestId") or record["query"])
+            if identity in self.seen_voice_records:
+                continue
+            actionable = (
+                self.need_ask_gpt(record) or self.need_change_prompt(record)
+                or record["query"] in (self.config.start_conversation, self.config.end_conversation)
+            )
+            if actionable:
                 try:
-                    self.last_record.put_nowait(last_record)
-                    self.last_timestamp = timestamp
-                    return last_record
+                    self.last_record.put_nowait(record)
                 except asyncio.QueueFull:
-                    pass
-        return None
+                    self.log.warning("语音队列已满，暂缓接收后续记录；请等待当前请求完成")
+                    break  # do not acknowledge records we could not enqueue
+                first = first or record
+                print(f"已接收语音指令，待处理 {self.last_record.qsize()} 条。")
+            else:
+                print("已收到语音但未触发：普通问题请以“请/帮我”开头，取件码可直接说“打印1234”。")
+            self.seen_voice_records[identity] = True
+            if len(self.seen_voice_records) > 512:
+                self.seen_voice_records.popitem(last=False)
+            self.last_timestamp = max(self.last_timestamp, timestamp)
+        return first
 
     async def do_tts(self, value):
         if not self.config.use_command:
@@ -332,7 +346,7 @@ class MiGPT:
                 answer = self.chatbot.ask(query, **self.config.gpt_options)
             else:
                 answer = await self.chatbot.ask(query, **self.config.gpt_options)
-            message = self._normalize(answer) if answer else ""
+            message = self._normalize(answer) if answer else "模型暂时没有返回回答，请稍后再试。"
             yield message
             return
 
@@ -373,11 +387,13 @@ class MiGPT:
         return (playing_info or {}).get("status") == 1
 
     async def stop_if_xiaoai_is_playing(self):
-        is_playing = await self.get_if_xiaoai_is_playing()
-        if is_playing:
-            self.log.debug("Muting xiaoai")
-            # stop it
-            await self.mina_service.player_pause(self.device_id)
+        try:
+            is_playing = await self.get_if_xiaoai_is_playing()
+            if is_playing:
+                self.log.debug("Muting xiaoai")
+                await self.mina_service.player_pause(self.device_id)
+        except Exception as error:
+            self.log.warning("暂停原生回答失败（%s），继续处理请求", type(error).__name__)
 
     async def wakeup_xiaoai(self):
         return await device_command(
@@ -388,8 +404,7 @@ class MiGPT:
 
     async def run_forever(self):
         await self.init_all_data()
-        task = asyncio.create_task(self.poll_latest_ask())
-        assert task is not None  # to keep the reference to task, do not remove this
+        self.poll_task = asyncio.create_task(self.poll_latest_ask())
         print(
             f"Running xiaogpt now, 用 [green]{'/'.join(self.config.keyword)}[/] 开头来提问"
         )
